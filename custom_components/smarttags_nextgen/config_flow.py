@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 # Fixed: Added REGION_ASIA_2 to the source import parameters mapping
@@ -41,30 +41,142 @@ class SmartTagsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: Dict[str, str] = {}
         
         if user_input is not None:
-            try:
-                info = await validate_input(self.hass, user_input)
-                return self.async_create_entry(title=info["title"], data=user_input)
-            except config_entries.exceptions.InvalidAuth:
-                errors["base"] = "invalid_auth"
-            except config_entries.exceptions.CannotConnect:
-                errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception occurred during validation")
-                errors["base"] = "unknown"
+            region_selection = user_input.get(CONF_REGION)
+            custom_region_val = user_input.get("custom_region")
+            
+            actual_region = region_selection
+            if region_selection == "custom":
+                if not custom_region_val or not custom_region_val.strip():
+                    errors["custom_region"] = "empty_custom_region"
+                else:
+                    actual_region = custom_region_val.strip()
+
+            if not errors:
+                validation_data = {
+                    CONF_JSESSION_ID: user_input[CONF_JSESSION_ID],
+                    CONF_REGION: actual_region
+                }
+                try:
+                    info = await validate_input(self.hass, validation_data)
+                    return self.async_create_entry(title=info["title"], data=validation_data)
+                except config_entries.exceptions.InvalidAuth:
+                    errors["base"] = "invalid_auth"
+                except config_entries.exceptions.CannotConnect:
+                    errors["base"] = "cannot_connect"
+                except Exception:  # pylint: disable=broad-except
+                    _LOGGER.exception("Unexpected exception occurred during validation")
+                    errors["base"] = "unknown"
 
         # Explicit key-value mapping dict linking internal region values to friendly readable UI names
         region_options = {
             REGION_EUROPE: "Europe (prd-eu)",
             REGION_US_GENERAL: "General / US (prd-us)",
             REGION_ASIA: "Asia / Pacific (prd-ap)",
-            REGION_ASIA_2: "Asia / Pacific 2 (prd-ap2)"
+            REGION_ASIA_2: "Asia / Pacific 2 (prd-ap2)",
+            "custom": "Other / Custom..."
         }
 
+        jsession_default = ""
+        region_default = REGION_EUROPE
+        custom_region_default = ""
+        if user_input is not None:
+            jsession_default = user_input.get(CONF_JSESSION_ID, "")
+            region_default = user_input.get(CONF_REGION, REGION_EUROPE)
+            custom_region_default = user_input.get("custom_region", "")
+
         data_schema = vol.Schema({
-            vol.Required(CONF_JSESSION_ID): str,
-            vol.Required(CONF_REGION, default=REGION_EUROPE): vol.In(region_options)
+            vol.Required(CONF_JSESSION_ID, default=jsession_default): str,
+            vol.Required(CONF_REGION, default=region_default): vol.In(region_options),
+            vol.Optional("custom_region", default=custom_region_default): str
         })
 
         return self.async_show_form(
-            step_id="user", data_schema=data_schema, errors=errors
+            step_id="user",
+            data_schema=data_schema,
+            errors=errors,
+            description_placeholders={"url": "https://smartthingsfind.samsung.com"},
+        )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Create the options flow."""
+        return SmartTagsOptionsFlowHandler()
+
+
+class SmartTagsOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow for SmartThings Find NextGen."""
+
+    async def async_step_init(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """Manage the options."""
+        errors: Dict[str, str] = {}
+
+        if user_input is not None:
+            region_selection = user_input.get(CONF_REGION)
+            custom_region_val = user_input.get("custom_region")
+            
+            actual_region = region_selection
+            if region_selection == "custom":
+                if not custom_region_val or not custom_region_val.strip():
+                    errors["custom_region"] = "empty_custom_region"
+                else:
+                    actual_region = custom_region_val.strip()
+
+            if not errors:
+                validation_data = {
+                    CONF_JSESSION_ID: user_input[CONF_JSESSION_ID],
+                    CONF_REGION: actual_region
+                }
+                try:
+                    await validate_input(self.hass, validation_data)
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry, data=validation_data
+                    )
+                    return self.async_create_entry(title="", data={})
+                except config_entries.exceptions.InvalidAuth:
+                    errors["base"] = "invalid_auth"
+                except config_entries.exceptions.CannotConnect:
+                    errors["base"] = "cannot_connect"
+                except Exception:  # pylint: disable=broad-except
+                    _LOGGER.exception("Unexpected exception occurred during validation")
+                    errors["base"] = "unknown"
+
+        # Explicit key-value mapping dict linking internal region values to friendly readable UI names
+        region_options = {
+            REGION_EUROPE: "Europe (prd-eu)",
+            REGION_US_GENERAL: "General / US (prd-us)",
+            REGION_ASIA: "Asia / Pacific (prd-ap)",
+            REGION_ASIA_2: "Asia / Pacific 2 (prd-ap2)",
+            "custom": "Other / Custom..."
+        }
+
+        if user_input is not None:
+            jsession_default = user_input.get(CONF_JSESSION_ID, "")
+            region_default = user_input.get(CONF_REGION, REGION_EUROPE)
+            custom_region_default = user_input.get("custom_region", "")
+        else:
+            jsession_default = self.config_entry.data.get(CONF_JSESSION_ID, "")
+            current_region = self.config_entry.data.get(CONF_REGION, REGION_EUROPE)
+            
+            region_default = current_region
+            custom_region_default = ""
+            if current_region not in [REGION_EUROPE, REGION_US_GENERAL, REGION_ASIA, REGION_ASIA_2]:
+                region_default = "custom"
+                custom_region_default = current_region
+
+        data_schema = vol.Schema({
+            vol.Required(CONF_JSESSION_ID, default=jsession_default): str,
+            vol.Required(CONF_REGION, default=region_default): vol.In(region_options),
+            vol.Optional("custom_region", default=custom_region_default): str
+        })
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=data_schema,
+            errors=errors,
+            description_placeholders={"url": "https://smartthingsfind.samsung.com"},
         )
