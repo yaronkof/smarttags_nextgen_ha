@@ -59,14 +59,20 @@ class SmartTagCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 _LOGGER.warning("Ignoring a SmartTag without a device ID")
                 continue
 
-            raw_name = tag.get("nickName") or tag.get("modelName") or "SmartTag"
-            name = html.unescape(html.unescape(str(raw_name)))
+            # Samsung's device-list payload uses modelName for the user-facing
+            # SmartTag name and nickName for the hardware/model-style value on
+            # the accounts we support. Some names are HTML-encoded more than
+            # once, so normalize both fields before exposing them to HA.
+            name = _decode_samsung_text(
+                tag.get("modelName") or tag.get("nickName") or "SmartTag"
+            )
+            model = _decode_samsung_text(tag.get("nickName") or "SmartTag")
             old_tag_data = old_data.get(device_id, {})
 
             tag_data: dict[str, Any] = {
                 "device_id": device_id,
                 "name": name,
-                "model": tag.get("modelName"),
+                "model": model,
                 "latitude": old_tag_data.get("latitude"),
                 "longitude": old_tag_data.get("longitude"),
                 "battery": old_tag_data.get("battery"),
@@ -119,6 +125,17 @@ class SmartTagCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             normalized_data[device_id] = tag_data
 
         return normalized_data
+
+
+def _decode_samsung_text(value: Any) -> str:
+    """Decode Samsung text fields that may contain nested HTML entities."""
+    decoded = str(value)
+    for _ in range(5):
+        next_value = html.unescape(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded.strip()
 
 
 def _safe_float(value: Any) -> float | None:
