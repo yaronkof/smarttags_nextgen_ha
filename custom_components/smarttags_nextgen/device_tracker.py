@@ -1,57 +1,96 @@
+"""Device tracker entities for SmartThings Find NextGen."""
+
+from __future__ import annotations
+
+from typing import Any
+
 from homeassistant.components.device_tracker import TrackerEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
 from .const import DOMAIN
+from .coordinator import SmartTagCoordinator
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    """Set up the SmartTag device tracker platform for multiple tags."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-    
-    entities = []
-    # Loop through the dictionary keys (device IDs) the coordinator built
-    for device_id, tag_data in coordinator.data.items():
-        name = tag_data.get("name", "SmartTag")
-        entities.append(SmartTagTracker(coordinator, device_id, name))
-        
-    async_add_entities(entities)
 
-class SmartTagTracker(CoordinatorEntity, TrackerEntity):
-    """Representation of a specific Samsung SmartTag on the HA Map."""
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up SmartTag trackers and add newly discovered tags dynamically."""
+    coordinator: SmartTagCoordinator = hass.data[DOMAIN][entry.entry_id]
+    known_device_ids: set[str] = set()
 
-    def __init__(self, coordinator, device_id, name):
+    @callback
+    def async_add_new_entities() -> None:
+        data = coordinator.data or {}
+        new_device_ids = set(data) - known_device_ids
+        if not new_device_ids:
+            return
+
+        async_add_entities(
+            [SmartTagTracker(coordinator, device_id) for device_id in new_device_ids]
+        )
+        known_device_ids.update(new_device_ids)
+
+    async_add_new_entities()
+    entry.async_on_unload(coordinator.async_add_listener(async_add_new_entities))
+
+
+class SmartTagTracker(CoordinatorEntity[SmartTagCoordinator], TrackerEntity):
+    """Representation of one Samsung SmartTag on the Home Assistant map."""
+
+    _attr_icon = "mdi:tag-location"
+
+    def __init__(self, coordinator: SmartTagCoordinator, device_id: str) -> None:
         super().__init__(coordinator)
         self.device_id = device_id
         self._attr_unique_id = f"smarttag_{device_id}"
-        self._attr_name = name
-
-    # Helper property to quickly grab this specific tag's data block
-    @property
-    def tag_data(self):
-        return self.coordinator.data.get(self.device_id, {})
 
     @property
-    def latitude(self):
+    def tag_data(self) -> dict[str, Any]:
+        """Return the latest data block for this SmartTag."""
+        return (self.coordinator.data or {}).get(self.device_id, {})
+
+    @property
+    def name(self) -> str:
+        """Return the user-facing SmartTag name."""
+        return self.tag_data.get("name", "SmartTag")
+
+    @property
+    def latitude(self) -> float | None:
+        """Return the last known latitude."""
         return self.tag_data.get("latitude")
 
     @property
-    def longitude(self):
+    def longitude(self) -> float | None:
+        """Return the last known longitude."""
         return self.tag_data.get("longitude")
 
     @property
-    def source_type(self):
-        return "gps"
-
-    @property
-    def battery_level(self):
+    def battery_level(self) -> int | None:
+        """Return an approximate battery percentage for backwards compatibility."""
         battery_map = {"HIGH": 100, "MEDIUM": 50, "LOW": 10}
-        current_battery = self.tag_data.get("battery", "UNKNOWN")
-        return battery_map.get(current_battery)
+        return battery_map.get(self.tag_data.get("battery", "UNKNOWN"))
 
     @property
-    def icon(self):
-        return "mdi:tag-location"
-        
+    def device_info(self) -> DeviceInfo:
+        """Group the tracker under a physical SmartTag device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.device_id)},
+            name=self.name,
+            manufacturer="Samsung",
+            model=self.tag_data.get("model") or "SmartTag",
+        )
+
     @property
-    def extra_state_attributes(self):
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose useful Samsung metadata without inventing precision."""
         return {
-            "location_type": self.tag_data.get("location_type")
+            "location_type": self.tag_data.get("location_type"),
+            "last_seen": self.tag_data.get("last_seen"),
+            "battery_state": self.tag_data.get("battery"),
         }
