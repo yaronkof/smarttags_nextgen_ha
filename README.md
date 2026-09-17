@@ -1,63 +1,187 @@
-# SmartThings Find NextGen
-This is a spiritual successor to https://github.com/Vedeneb/HA-SmartThings-Find as I really wanted that feature.
+# SmartThings Find NextGen for Home Assistant
 
-Viewing smart tags locations on Home Assistant
+A custom Home Assistant integration that exposes Samsung SmartTag locations from **SmartThings Find** as `device_tracker` entities.
 
-This project currently only allows to see the locations of the smart tags and not control them in any way. I don't currently plan to try and add these things.
+> [!IMPORTANT]
+> This integration uses Samsung's private SmartThings Find web endpoints. It is not an official Samsung API, and Samsung may change the endpoints or authentication flow without notice.
 
-I only have 1 smart tag so I haven't tested it with more than 1, it should work as I dynamically get the list but it might be broken on certain conditions. If you find bugs, feel free to open an issue.
+## Project ownership and credit
+
+This repository is maintained by **[@yaronkof](https://github.com/yaronkof)**.
+
+The project is based on the original **SmartThings Find NextGen** integration by **[@saarglobin](https://github.com/saarglobin)**:
+
+- Original project: https://github.com/saarglobin/smarttags_nextgen_ha
+- Current maintained repository: https://github.com/yaronkof/smarttags_nextgen_ha
+
+The original project was itself created as a spiritual successor to Vedeneb's HA-SmartThings-Find project. Original authors and contributors retain credit for their work. See [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE).
+
+## Features
+
+- Creates a Home Assistant `device_tracker` entity for each Samsung SmartTag found in the account.
+- Supports multiple SmartTags.
+- Automatically adds newly discovered SmartTags without requiring a Home Assistant restart.
+- Polls SmartThings Find approximately every **5 minutes**.
+- Supports Samsung regions:
+  - Europe: `prd-eu`
+  - General / US: `prd-us`
+  - Asia / Pacific: `prd-ap`
+  - Asia / Pacific 2: `prd-ap2`
+  - Custom region values when required.
+- Keeps the last known coordinates if Samsung temporarily returns no new location.
+- Exposes additional attributes:
+  - `location_type`
+  - `last_seen`
+  - `battery_state`
+- Detects expired Samsung sessions and starts Home Assistant's reauthentication flow.
+- Creates Device Registry entries for SmartTags.
+
+## Limitations
+
+- Location is cloud-polled, not real-time.
+- This integration currently **does not control SmartTags** (ring, search, etc.).
+- Samsung provides battery state such as `HIGH`, `MEDIUM`, or `LOW`, not a precise battery percentage. The tracker currently retains the legacy approximate percentage field for backwards compatibility; Home Assistant has deprecated battery values on device trackers, so this may move to a separate entity in a future release.
+- The `JSESSIONID` cookie expires periodically and must then be replaced.
+- Because this is based on undocumented Samsung web endpoints, a Samsung website/backend change can break the integration.
 
 ## Installation
 
-### Method 1: HACS (Recommended)
+### HACS — recommended
 
-Since this integration is not currently in the default HACS store, you can easily add it as a Custom Repository:
+This repository is currently installed as a **custom HACS repository**.
 
-1. Open **HACS** in your Home Assistant dashboard.
-2. Click the **three dots** in the top right corner and select **Custom repositories**.
-3. Paste the URL of this GitHub repository into the **Repository** box.
-4. For **Category**, select **Integration**.
-5. Click **Add**.
-6. Find the **SmartThings Find NextGen** integration in the list and click **Download**.
-7. Restart Home Assistant.
+1. Open **HACS** in Home Assistant.
+2. Open the three-dot menu and choose **Custom repositories**.
+3. Add:
 
----
+   `https://github.com/yaronkof/smarttags_nextgen_ha`
 
-### Method 2: Manual Installation
+4. Select **Integration** as the category.
+5. Find **SmartThings Find NextGen** and install it.
+6. Restart Home Assistant if HACS asks you to.
+7. Go to **Settings → Devices & services → Add integration** and search for **SmartThings Find NextGen**.
 
-If you prefer not to use HACS, you can install the integration files directly onto your server:
+### Manual installation
 
-1. Download the latest release source code (or clone this repository).
-2. Using an SSH client, Samba, or the File Editor add-on, locate your Home Assistant `config/` directory.
-3. Look for a folder named `custom_components`. If it does not exist, create it.
-4. Copy the `smarttags_nextgen_ha` folder from this repository into your `custom_components/` directory.
+1. Download or clone this repository.
+2. Copy the integration directory:
 
-## Setup Instructions
+   `custom_components/smarttags_nextgen`
 
-1. Go to the Integrations page.
-2. Search "SmartThings Find NextGen".
-3. Visit https://smartthingsfind.samsung.com/ and log in with your Samsung account.
-4. Open Developer Tools in your browser.
-5. Copy the JSESSIONID value. Note to copy the one from smartthingsfind.samsung.com (you might have another from another domain).
-6. Enter your JSESSIONID into Home Assistant.
-7. Enjoy :)
+   into your Home Assistant configuration directory so the final path is:
+
+   `config/custom_components/smarttags_nextgen`
+
+3. Restart Home Assistant.
+4. Go to **Settings → Devices & services → Add integration** and search for **SmartThings Find NextGen**.
+
+## Getting the Samsung JSESSIONID
+
+The integration currently authenticates using the browser session created by the SmartThings Find website.
+
+1. Open https://smartthingsfind.samsung.com/ in a desktop browser.
+2. Sign in to your Samsung account.
+3. Open the browser Developer Tools (`F12` in most browsers).
+4. Open the **Application** or **Storage** section.
+5. Open the cookies for `https://smartthingsfind.samsung.com`.
+6. Find the cookie named **`JSESSIONID`**.
+7. Copy its **value** and paste it into the integration setup form.
+8. Choose the appropriate Samsung region. If none of the predefined regions works for your account, use **Other / Custom** and enter the required `prd-*` value.
+
+### Security warning
+
+Treat the `JSESSIONID` like a password/session token.
+
+**Do not:**
+
+- post it in a GitHub issue,
+- paste it into screenshots,
+- include it in Home Assistant logs,
+- share it with another person.
+
+If a JSESSIONID has accidentally been exposed, sign out of Samsung/SmartThings Find and create a new browser session before using the integration again.
+
+## Session expiration / reauthentication
+
+Samsung browser sessions expire periodically. When this happens, Home Assistant should mark the integration as requiring attention and offer a **Re-authenticate** flow.
+
+Sign in to SmartThings Find again, copy the new `JSESSIONID`, and submit it in Home Assistant.
+
+You can also manually update the JSESSIONID or region from the integration's configuration/options page.
+
+## Entity data
+
+Each SmartTag is represented as a GPS-style `device_tracker`.
+
+Typical data includes:
+
+| Data | Description |
+| --- | --- |
+| Latitude / longitude | Last known SmartTag position returned by Samsung |
+| `location_type` | Samsung location mode, including `offline` when appropriate |
+| `last_seen` | Samsung-provided GPS timestamp when available |
+| `battery_state` | Raw Samsung battery state such as `HIGH`, `MEDIUM`, or `LOW` |
+
+A missing fresh location does **not** necessarily mean the tag is currently at the last known coordinates. Check `last_seen` when location freshness matters.
+
+## Troubleshooting
+
+### Invalid authentication / reauthentication required
+
+The JSESSIONID has probably expired. Sign in to SmartThings Find again and copy a fresh cookie.
+
+### Cannot connect
+
+Possible causes include:
+
+- temporary Samsung service problems,
+- networking/DNS issues from Home Assistant,
+- Samsung rate limiting,
+- a change to Samsung's private endpoints.
+
+Check the Home Assistant logs and retry later before opening an issue.
+
+### No SmartTags appear
+
+Confirm that:
+
+- the tags are visible at https://smartthingsfind.samsung.com/ using the same Samsung account,
+- the selected region is correct,
+- the JSESSIONID came from `smartthingsfind.samsung.com`, not another Samsung domain.
+
+### Reporting bugs
+
+Open issues here:
+
+https://github.com/yaronkof/smarttags_nextgen_ha/issues
+
+Before submitting a bug report, remove all JSESSIONID/cookie values and other private account information from logs and screenshots.
+
+## Contributing
+
+Pull requests and useful bug reports are welcome. Please keep changes focused on the maintained repository (`yaronkof/smarttags_nextgen_ha`).
+
+## Release notes — 0.2.0
+
+- Project maintenance transferred to `yaronkof` with explicit credit to the original developer.
+- Updated repository/documentation/issue links.
+- Added explicit project attribution notice.
+- Added proper authentication and connection exceptions.
+- Added Home Assistant reauthentication flow for expired JSESSIONIDs.
+- Hardened Samsung response parsing so malformed coordinates do not break all tags.
+- Added `last_seen` location metadata.
+- Prefer SmartTag nickname over generic model name.
+- Added Device Registry information.
+- Added dynamic discovery of newly added SmartTags.
+- Removed the outdated string-based device tracker `source_type` override.
+- Removed dormant credential-header diagnostic logging code.
+- Corrected manual installation directory instructions.
+- Updated integration manifest metadata for the maintained repository.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## Contributions
-
-Contributions are welcome! Feel free to open issues or submit pull requests to help improve this integration.
-
-## Support
-
-For support, please create an issue on the GitHub repository.
-
-## Roadmap
-
-- Maybe more comfortable login
+MIT. See [LICENSE](LICENSE).
 
 ## Disclaimer
 
-This is a third-party integration and is not affiliated with or endorsed by Samsung or SmartThings.
+This project is a third-party community integration and is **not affiliated with, maintained by, or endorsed by Samsung or SmartThings**.
