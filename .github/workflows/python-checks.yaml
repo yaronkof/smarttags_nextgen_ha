@@ -1,0 +1,28 @@
+name: Python and JSON checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Compile Python sources
+        run: python -m compileall -q custom_components
+
+      - name: Validate JSON files
+        run: |
+          python -m json.tool custom_components/smarttags_nextgen/manifest.json > /dev/null
+          python -m json.tool custom_components/smarttags_nextgen/strings.json > /dev/null
+          python -m json.tool custom_components/smarttags_nextgen/translations/en.json > /dev/null
+          python -m json.tool hacs.json > /dev/null
