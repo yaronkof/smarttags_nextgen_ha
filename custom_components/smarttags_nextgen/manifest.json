@@ -5,8 +5,9 @@
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/yaronkof/smarttags_nextgen_ha",
+  "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/yaronkof/smarttags_nextgen_ha/issues",
-  "requirements": ["aiohttp"],
-  "version": "0.1.8"
+  "requirements": [],
+  "version": "0.2.0"
 }
