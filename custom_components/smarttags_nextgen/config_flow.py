@@ -1,98 +1,204 @@
-"""Config flow for SmartThings Find NextGen integration."""
+"""Config flow for SmartThings Find NextGen."""
+
+from __future__ import annotations
+
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
+
 import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-# Fixed: Added REGION_ASIA_2 to the source import parameters mapping
-from .const import DOMAIN, CONF_JSESSION_ID, CONF_REGION, REGION_EUROPE, REGION_US_GENERAL, REGION_ASIA, REGION_ASIA_2
-from .api import SmartTagsAPI
+from .api import (
+    SmartTagsAPI,
+    SmartTagsAuthenticationError,
+    SmartTagsConnectionError,
+)
+from .const import (
+    CONF_JSESSION_ID,
+    CONF_REGION,
+    DOMAIN,
+    REGION_ASIA,
+    REGION_ASIA_2,
+    REGION_EUROPE,
+    REGION_US_GENERAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-async def validate_input(hass: HomeAssistant, data: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate the user input by attempting a login with the selected region."""
-    session = async_get_clientsession(hass)
-    
-    # Instantiate the API orchestrator with the chosen region from the dropdown form
-    api = SmartTagsAPI(session, data[CONF_JSESSION_ID], data[CONF_REGION])
-    
-    # Pre-flight validation check executing a dynamic CSRF exchange
-    success = await api.refresh_csrf_token()
-    if not success:
-        raise config_entries.exceptions.InvalidAuth
-        
-    devices = await api.get_devices()
-    if devices is None:
-        raise config_entries.exceptions.CannotConnect
-        
+REGION_OPTIONS = {
+    REGION_EUROPE: "Europe (prd-eu)",
+    REGION_US_GENERAL: "General / US (prd-us)",
+    REGION_ASIA: "Asia / Pacific (prd-ap)",
+    REGION_ASIA_2: "Asia / Pacific 2 (prd-ap2)",
+    "custom": "Other / Custom...",
+}
+KNOWN_REGIONS = {
+    REGION_EUROPE,
+    REGION_US_GENERAL,
+    REGION_ASIA,
+    REGION_ASIA_2,
+}
+
+
+class CannotConnect(HomeAssistantError):
+    """Raised when SmartThings Find cannot be reached."""
+
+
+class InvalidAuth(HomeAssistantError):
+    """Raised when the Samsung browser session is invalid."""
+
+
+async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
+    """Validate a JSESSIONID and region against SmartThings Find."""
+    api = SmartTagsAPI(
+        async_get_clientsession(hass),
+        data[CONF_JSESSION_ID],
+        data[CONF_REGION],
+    )
+    try:
+        await api.refresh_csrf_token()
+        await api.get_devices()
+    except SmartTagsAuthenticationError as err:
+        raise InvalidAuth from err
+    except SmartTagsConnectionError as err:
+        raise CannotConnect from err
+
     return {"title": "SmartThings Find Account"}
 
+
+def _normalize_input(user_input: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, str]]:
+    """Convert UI region selection to the value stored in the config entry."""
+    errors: dict[str, str] = {}
+    region_selection = user_input.get(CONF_REGION, REGION_EUROPE)
+    actual_region = region_selection
+
+    if region_selection == "custom":
+        custom_region = str(user_input.get("custom_region", "")).strip()
+        if not custom_region:
+            errors["custom_region"] = "empty_custom_region"
+        else:
+            actual_region = custom_region
+
+    if errors:
+        return None, errors
+
+    return {
+        CONF_JSESSION_ID: str(user_input[CONF_JSESSION_ID]).strip(),
+        CONF_REGION: actual_region,
+    }, errors
+
+
+def _schema(
+    *,
+    jsession_id: str = "",
+    region: str = REGION_EUROPE,
+    custom_region: str = "",
+) -> vol.Schema:
+    """Build the shared setup/reconfigure form schema."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_JSESSION_ID, default=jsession_id): str,
+            vol.Required(CONF_REGION, default=region): vol.In(REGION_OPTIONS),
+            vol.Optional("custom_region", default=custom_region): str,
+        }
+    )
+
+
+def _region_defaults(stored_region: str) -> tuple[str, str]:
+    """Translate a stored custom region back to form defaults."""
+    if stored_region in KNOWN_REGIONS:
+        return stored_region, ""
+    return "custom", stored_region
+
+
 class SmartTagsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for SmartThings Find NextGen."""
+    """Handle the SmartThings Find NextGen config flow."""
 
     VERSION = 1
 
-    async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None) -> Any:
-        """Handle the initial step creating the interactive UI configurations."""
-        errors: Dict[str, str] = {}
-        
-        if user_input is not None:
-            region_selection = user_input.get(CONF_REGION)
-            custom_region_val = user_input.get("custom_region")
-            
-            actual_region = region_selection
-            if region_selection == "custom":
-                if not custom_region_val or not custom_region_val.strip():
-                    errors["custom_region"] = "empty_custom_region"
-                else:
-                    actual_region = custom_region_val.strip()
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Handle initial setup."""
+        errors: dict[str, str] = {}
 
-            if not errors:
-                validation_data = {
-                    CONF_JSESSION_ID: user_input[CONF_JSESSION_ID],
-                    CONF_REGION: actual_region
-                }
+        if user_input is not None:
+            validation_data, errors = _normalize_input(user_input)
+            if validation_data is not None:
                 try:
                     info = await validate_input(self.hass, validation_data)
-                    return self.async_create_entry(title=info["title"], data=validation_data)
-                except config_entries.exceptions.InvalidAuth:
+                except InvalidAuth:
                     errors["base"] = "invalid_auth"
-                except config_entries.exceptions.CannotConnect:
+                except CannotConnect:
                     errors["base"] = "cannot_connect"
-                except Exception:  # pylint: disable=broad-except
-                    _LOGGER.exception("Unexpected exception occurred during validation")
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Unexpected error validating SmartThings Find")
                     errors["base"] = "unknown"
-
-        # Explicit key-value mapping dict linking internal region values to friendly readable UI names
-        region_options = {
-            REGION_EUROPE: "Europe (prd-eu)",
-            REGION_US_GENERAL: "General / US (prd-us)",
-            REGION_ASIA: "Asia / Pacific (prd-ap)",
-            REGION_ASIA_2: "Asia / Pacific 2 (prd-ap2)",
-            "custom": "Other / Custom..."
-        }
-
-        jsession_default = ""
-        region_default = REGION_EUROPE
-        custom_region_default = ""
-        if user_input is not None:
-            jsession_default = user_input.get(CONF_JSESSION_ID, "")
-            region_default = user_input.get(CONF_REGION, REGION_EUROPE)
-            custom_region_default = user_input.get("custom_region", "")
-
-        data_schema = vol.Schema({
-            vol.Required(CONF_JSESSION_ID, default=jsession_default): str,
-            vol.Required(CONF_REGION, default=region_default): vol.In(region_options),
-            vol.Optional("custom_region", default=custom_region_default): str
-        })
+                else:
+                    return self.async_create_entry(
+                        title=info["title"], data=validation_data
+                    )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=data_schema,
+            data_schema=_schema(
+                jsession_id=(user_input or {}).get(CONF_JSESSION_ID, ""),
+                region=(user_input or {}).get(CONF_REGION, REGION_EUROPE),
+                custom_region=(user_input or {}).get("custom_region", ""),
+            ),
+            errors=errors,
+            description_placeholders={"url": "https://smartthingsfind.samsung.com"},
+        )
+
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> config_entries.ConfigFlowResult:
+        """Start reauthentication when the Samsung session expires."""
+        self._reauth_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Validate and store a replacement JSESSIONID."""
+        entry = self._reauth_entry
+        if entry is None:
+            return self.async_abort(reason="reauth_failed")
+
+        errors: dict[str, str] = {}
+        current_region = entry.data.get(CONF_REGION, REGION_EUROPE)
+
+        if user_input is not None:
+            validation_data = {
+                CONF_JSESSION_ID: str(user_input[CONF_JSESSION_ID]).strip(),
+                CONF_REGION: current_region,
+            }
+            try:
+                await validate_input(self.hass, validation_data)
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error during SmartThings Find reauth")
+                errors["base"] = "unknown"
+            else:
+                self.hass.config_entries.async_update_entry(
+                    entry,
+                    data={**entry.data, CONF_JSESSION_ID: validation_data[CONF_JSESSION_ID]},
+                )
+                await self.hass.config_entries.async_reload(entry.entry_id)
+                return self.async_abort(reason="reauth_successful")
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_JSESSION_ID): str}),
             errors=errors,
             description_placeholders={"url": "https://smartthingsfind.samsung.com"},
         )
@@ -102,57 +208,36 @@ class SmartTagsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
-        """Create the options flow."""
+        """Return the options flow for manual credential/region updates."""
         return SmartTagsOptionsFlowHandler()
 
 
 class SmartTagsOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for SmartThings Find NextGen."""
+    """Allow manual JSESSIONID and region updates."""
 
     async def async_step_init(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> Any:
-        """Manage the options."""
-        errors: Dict[str, str] = {}
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Edit connection settings."""
+        errors: dict[str, str] = {}
 
         if user_input is not None:
-            region_selection = user_input.get(CONF_REGION)
-            custom_region_val = user_input.get("custom_region")
-            
-            actual_region = region_selection
-            if region_selection == "custom":
-                if not custom_region_val or not custom_region_val.strip():
-                    errors["custom_region"] = "empty_custom_region"
-                else:
-                    actual_region = custom_region_val.strip()
-
-            if not errors:
-                validation_data = {
-                    CONF_JSESSION_ID: user_input[CONF_JSESSION_ID],
-                    CONF_REGION: actual_region
-                }
+            validation_data, errors = _normalize_input(user_input)
+            if validation_data is not None:
                 try:
                     await validate_input(self.hass, validation_data)
+                except InvalidAuth:
+                    errors["base"] = "invalid_auth"
+                except CannotConnect:
+                    errors["base"] = "cannot_connect"
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Unexpected error updating SmartThings Find")
+                    errors["base"] = "unknown"
+                else:
                     self.hass.config_entries.async_update_entry(
                         self.config_entry, data=validation_data
                     )
                     return self.async_create_entry(title="", data={})
-                except config_entries.exceptions.InvalidAuth:
-                    errors["base"] = "invalid_auth"
-                except config_entries.exceptions.CannotConnect:
-                    errors["base"] = "cannot_connect"
-                except Exception:  # pylint: disable=broad-except
-                    _LOGGER.exception("Unexpected exception occurred during validation")
-                    errors["base"] = "unknown"
-
-        # Explicit key-value mapping dict linking internal region values to friendly readable UI names
-        region_options = {
-            REGION_EUROPE: "Europe (prd-eu)",
-            REGION_US_GENERAL: "General / US (prd-us)",
-            REGION_ASIA: "Asia / Pacific (prd-ap)",
-            REGION_ASIA_2: "Asia / Pacific 2 (prd-ap2)",
-            "custom": "Other / Custom..."
-        }
 
         if user_input is not None:
             jsession_default = user_input.get(CONF_JSESSION_ID, "")
@@ -160,23 +245,17 @@ class SmartTagsOptionsFlowHandler(config_entries.OptionsFlow):
             custom_region_default = user_input.get("custom_region", "")
         else:
             jsession_default = self.config_entry.data.get(CONF_JSESSION_ID, "")
-            current_region = self.config_entry.data.get(CONF_REGION, REGION_EUROPE)
-            
-            region_default = current_region
-            custom_region_default = ""
-            if current_region not in [REGION_EUROPE, REGION_US_GENERAL, REGION_ASIA, REGION_ASIA_2]:
-                region_default = "custom"
-                custom_region_default = current_region
-
-        data_schema = vol.Schema({
-            vol.Required(CONF_JSESSION_ID, default=jsession_default): str,
-            vol.Required(CONF_REGION, default=region_default): vol.In(region_options),
-            vol.Optional("custom_region", default=custom_region_default): str
-        })
+            region_default, custom_region_default = _region_defaults(
+                self.config_entry.data.get(CONF_REGION, REGION_EUROPE)
+            )
 
         return self.async_show_form(
             step_id="init",
-            data_schema=data_schema,
+            data_schema=_schema(
+                jsession_id=jsession_default,
+                region=region_default,
+                custom_region=custom_region_default,
+            ),
             errors=errors,
             description_placeholders={"url": "https://smartthingsfind.samsung.com"},
         )
