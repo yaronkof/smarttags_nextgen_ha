@@ -16,6 +16,12 @@ The project is based on the original **SmartThings Find NextGen** integration by
 
 The original project was itself created as a spiritual successor to Vedeneb's HA-SmartThings-Find project. Original authors and contributors retain credit for their work. See [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE).
 
+## Contributors
+
+- **[@yaronkof](https://github.com/yaronkof)** — current maintainer and project owner.
+- **ChatGPT by OpenAI** — development assistance, code review, documentation, architecture, and maintenance support.
+- Original authors and contributors remain credited through the repository history, [NOTICE.md](NOTICE.md), and [LICENSE](LICENSE).
+
 ## Features
 
 - Creates a Home Assistant `device_tracker` entity for each Samsung SmartTag found in the account.
