@@ -1,115 +1,162 @@
-import aiohttp
+"""Samsung SmartThings Find HTTP client."""
+
+from __future__ import annotations
+
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Any
+
+import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
+BASE_URL = "https://smartthingsfind.samsung.com"
+
+
+class SmartTagsAPIError(Exception):
+    """Base exception for SmartThings Find API errors."""
+
+
+class SmartTagsAuthenticationError(SmartTagsAPIError):
+    """Raised when the Samsung session is no longer valid."""
+
+
+class SmartTagsConnectionError(SmartTagsAPIError):
+    """Raised when SmartThings Find cannot be reached or returns invalid data."""
+
+
 class SmartTagsAPI:
-    def __init__(self, session: aiohttp.ClientSession, jsession_id: str, region: str):
+    """Small async client for the SmartThings Find web endpoints used by the integration."""
+
+    def __init__(self, session: aiohttp.ClientSession, jsession_id: str, region: str) -> None:
         self.session = session
         self.jsession_id = jsession_id
-        self.region = region  # Capture the region selected dynamically during config flow execution
-        self.csrf_token: Optional[str] = None
+        self.region = region
+        self.csrf_token: str | None = None
 
     @property
-    def headers(self) -> Dict[str, str]:
-        """Dynamically build HTTP headers to ensure the current region is evaluated on every request."""
+    def headers(self) -> dict[str, str]:
+        """Build the browser-like headers required by the SmartThings Find web API."""
         return {
             "accept": "application/json, text/plain, */*",
-            "accept-language": "en-US,en;q=0.9,he;q=0.8,ja;q=0.7",
+            "accept-language": "en-US,en;q=0.9",
             "Cookie": f"JSESSIONID={self.jsession_id}",
-            "origin": "https://smartthingsfind.samsung.com",
-            "priority": "u=1, i",
-            "referer": "https://smartthingsfind.samsung.com/",
-            "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+            "origin": BASE_URL,
+            "referer": f"{BASE_URL}/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/148 Safari/537.36",
             "x-fmm-origin": self.region,
-            "x-fmm-orgin": self.region  # Maintain the structural typo fallback as discovered natively
+            # Samsung currently also expects this misspelled header on some regions.
+            "x-fmm-orgin": self.region,
         }
 
-    async def refresh_csrf_token(self) -> bool:
-        """Fetch a fresh CSRF token from the chkLogin endpoint."""
-        url = "https://smartthingsfind.samsung.com/chkLogin.do"
-        try:
-            async with self.session.get(url, headers=self.headers) as resp:
-                csrf = resp.headers.get("_csrf") or resp.headers.get("X-CSRF-TOKEN")
-                if csrf:
-                    self.csrf_token = csrf
-                    _LOGGER.info("SmartThings Find: Successfully refreshed CSRF token dynamically")
-                    return True
-                
-                _LOGGER.error("SmartThings Find: chkLogin responded but '_csrf' header was missing. Session might be invalid.")
-                return False
-        except Exception as e:
-            _LOGGER.error("Network error attempting to refresh CSRF token: %s", e)
-            return False
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Perform a JSON request with consistent authentication and error handling."""
+        headers = self.headers
+        if json is not None:
+            headers = {**headers, "content-type": "application/json"}
 
-    async def get_devices(self) -> Optional[List[Dict[str, Any]]]:
-        """Fetch the list of all registered devices."""
+        try:
+            async with self.session.request(
+                method,
+                f"{BASE_URL}{path}",
+                headers=headers,
+                json=json,
+            ) as response:
+                if response.status in (401, 403):
+                    raise SmartTagsAuthenticationError(
+                        "Samsung rejected the current JSESSIONID"
+                    )
+                if response.status == 429:
+                    raise SmartTagsConnectionError("Samsung rate-limited the request")
+                if response.status >= 400:
+                    raise SmartTagsConnectionError(
+                        f"Samsung returned HTTP {response.status} for {path}"
+                    )
+
+                try:
+                    data = await response.json()
+                except (aiohttp.ContentTypeError, ValueError) as err:
+                    raise SmartTagsConnectionError(
+                        f"Samsung returned an invalid JSON response for {path}"
+                    ) from err
+
+                if not isinstance(data, dict):
+                    raise SmartTagsConnectionError(
+                        f"Samsung returned an unexpected response for {path}"
+                    )
+                return data
+        except SmartTagsAPIError:
+            raise
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise SmartTagsConnectionError(
+                f"Network error while contacting SmartThings Find: {err}"
+            ) from err
+
+    async def refresh_csrf_token(self) -> str:
+        """Fetch and store a fresh CSRF token."""
+        try:
+            async with self.session.get(
+                f"{BASE_URL}/chkLogin.do", headers=self.headers
+            ) as response:
+                if response.status in (401, 403):
+                    raise SmartTagsAuthenticationError(
+                        "Samsung rejected the current JSESSIONID"
+                    )
+                if response.status >= 400:
+                    raise SmartTagsConnectionError(
+                        f"Samsung returned HTTP {response.status} while refreshing authentication"
+                    )
+
+                csrf = response.headers.get("_csrf") or response.headers.get(
+                    "X-CSRF-TOKEN"
+                )
+                if not csrf:
+                    # chkLogin commonly returns a normal response without a CSRF header
+                    # when the browser session has expired.
+                    raise SmartTagsAuthenticationError(
+                        "Samsung session is invalid or expired"
+                    )
+
+                self.csrf_token = csrf
+                return csrf
+        except SmartTagsAPIError:
+            raise
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise SmartTagsConnectionError(
+                f"Network error while refreshing SmartThings Find authentication: {err}"
+            ) from err
+
+    async def get_devices(self) -> list[dict[str, Any]]:
+        """Fetch all devices registered in the Samsung account."""
         if not self.csrf_token:
-            _LOGGER.error("Cannot fetch devices: CSRF token is missing or uninitialized")
-            return None
+            raise SmartTagsAuthenticationError("CSRF token is not initialized")
 
-        url = f"https://smartthingsfind.samsung.com/device/getDeviceList.do?_csrf={self.csrf_token}"
-        headers = {**self.headers, "content-type": "application/json"}
-        
-        #-- check outgoing request ---
-        # _LOGGER.critical("QA DIAGNOSTIC - OUTGOING REQUEST HEADERS: %s", headers)
-        # -----------------------------------------------------
+        data = await self._request_json(
+            "POST",
+            f"/device/getDeviceList.do?_csrf={self.csrf_token}",
+            json={},
+        )
+        devices = data.get("deviceList", [])
+        if not isinstance(devices, list):
+            raise SmartTagsConnectionError("Samsung returned an invalid device list")
 
-        try:
-            async with self.session.post(url, headers=headers, json={}) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("Failed to fetch device list. Status: %s", resp.status)
-                    return None
-                    
-                data = await resp.json()
-                if data:
-                    device_list = data.get("deviceList", [])
-                    _LOGGER.info("SmartThings Find: Found %s total devices in Samsung account", len(device_list))
-                    return device_list
-                return None
-        except Exception as e:
-            _LOGGER.error("Network error fetching device list: %s", e)
-            return None
+        _LOGGER.debug("SmartThings Find returned %s devices", len(devices))
+        return devices
 
-    async def set_last_select(self, device_id: str) -> Optional[List[Dict[str, Any]]]:
-        """Fetch baseline state state updates for tracking entities."""
+    async def set_last_select(self, device_id: str) -> list[dict[str, Any]]:
+        """Request the current state/location operations for a device."""
         if not self.csrf_token:
-            return None
+            raise SmartTagsAuthenticationError("CSRF token is not initialized")
 
-        url = f"https://smartthingsfind.samsung.com/device/setLastSelect.do?_csrf={self.csrf_token}"
-        headers = {**self.headers, "content-type": "application/json"}
-        payload = {"dvceId": device_id}
-
-        try:
-            async with self.session.post(url, headers=headers, json=payload) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                return data.get("operation", []) if data else None
-        except Exception:
-            return None
-
-    async def get_device_locations(self, device_id: str, latest_time: str) -> Optional[List[Dict[str, Any]]]:
-        """Fetch live coordinate telemetry attributes."""
-        if not self.csrf_token:
-            return None
-
-        url = f"https://smartthingsfind.samsung.com/dm/getTagLocation.do?_csrf={self.csrf_token}"
-        headers = {**self.headers, "content-type": "application/json"}
-        payload = {"dvceId": device_id, "latestTime": latest_time}
-
-        try:
-            async with self.session.post(url, headers=headers, json=payload) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                return data.get("operation", []) if data else None
-        except Exception:
-            return None
+        data = await self._request_json(
+            "POST",
+            f"/device/setLastSelect.do?_csrf={self.csrf_token}",
+            json={"dvceId": device_id},
+        )
+        operations = data.get("operation", [])
+        return operations if isinstance(operations, list) else []
